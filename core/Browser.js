@@ -114,6 +114,20 @@ export default class Browser {
     }
 
     /**
+     * Map the browserHeadless config to the puppeteer-core launch option.
+     *
+     * `true` (default) becomes "shell" (old headless mode, needed for BeginFrameControl); `false` or an explicit
+     * puppeteer mode string ("shell", "new") is passed through.
+     *
+     * @param {boolean|string} [value] - browserHeadless config value
+     * @returns {boolean|string} - puppeteer-core headless option
+     */
+    static #resolveHeadlessMode(value) {
+        const headless = _.defaultTo(value, true);
+        return headless === true ? "shell" : headless;
+    }
+
+    /**
      * 浏览器资源初始化
      */
     async init() {
@@ -126,11 +140,13 @@ export default class Browser {
             // 启动浏览器
             this.target = await puppeteer.launch({
                 // BeginFrameControl必需处于无头模式下可用，新无头"new"暂时不可用，请关注进展：https://bugs.chromium.org/p/chromium/issues/detail?id=1480747
-                headless: _.defaultTo(globalConfig.browserHeadless, true),
+                // puppeteer-core >= 22 maps `true` to the new headless mode (--headless=new); "shell" keeps the
+                // old headless mode (--headless) that HeadlessExperimental.beginFrame requires.
+                headless: Browser.#resolveHeadlessMode(globalConfig.browserHeadless),
                 // 浏览器入口文件路径
                 executablePath,
-                // 忽略HTTPS错误
-                ignoreHTTPSErrors: true,
+                // 忽略HTTPS错误 (puppeteer-core >= 22 renamed ignoreHTTPSErrors to acceptInsecureCerts)
+                acceptInsecureCerts: true,
                 // 浏览器启动超时时间（毫秒）
                 timeout: _.defaultTo(globalConfig.browserLaunchTimeout, 30000),
                 // 是否输出调试信息到控制台
