@@ -106,10 +106,12 @@ export default class ResourcePool {
         this.#browserPool = genericPool.createPool({
             create: this.#createBrowser.bind(this),
             destroy: async target => target.close(),
-            validate: target => target.isReady()
+            // An idle browser whose Chrome is gone is evicted on the next acquire
+            validate: target => target.isReady() && !!target.target && target.target.connected
         }, {
             max: this.numBrowserMax,
             min: this.numBrowserMin,
+            testOnBorrow: true,
             autostart: false
         });
         this.#browserPool.on('factoryCreateError', (error) => {
@@ -187,7 +189,10 @@ export default class ResourcePool {
     async destoryBrowser(browser) {
         if (this.#checkMap[browser.id])
             delete this.#checkMap[browser.id];
-        await this.#browserPool.destroy(browser);
+        // generic-pool only destroys borrowed resources; an idle browser that closed is evicted by
+        // testOnBorrow (validate) on the next acquire
+        if (this.#browserPool.isBorrowedResource(browser))
+            await this.#browserPool.destroy(browser);
     }
 
     /**

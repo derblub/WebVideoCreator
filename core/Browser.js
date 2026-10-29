@@ -183,10 +183,12 @@ export default class Browser {
         this.#pagePool = genericPool.createPool({
             create: this.#createPage.bind(this),
             destroy: target => target.close(),
-            validate: target => target.isReady()
+            // An idle page whose tab or browser is gone is evicted on the next acquire
+            validate: target => target.isReady() && !!target.target && !target.target.isClosed() && target.target.browser().connected
         }, {
             max: this.numPageMax,
             min: this.numPageMin,
+            testOnBorrow: true,
             autostart: false
         });
         this.#pagePool.on('factoryCreateError', (error) => {
@@ -241,7 +243,10 @@ export default class Browser {
      * @param {Page} page - 页面资源
      */
     async destoryPage(page) {
-        await this.#pagePool.destroy(page);
+        // generic-pool only destroys borrowed resources; an idle page that closed is evicted by
+        // testOnBorrow (validate) on the next acquire
+        if (this.#pagePool.isBorrowedResource(page))
+            await this.#pagePool.destroy(page);
     }
 
     /**
