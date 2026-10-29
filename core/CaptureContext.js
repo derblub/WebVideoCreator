@@ -206,7 +206,12 @@ export default class CaptureContext {
                 // 开始捕获下一帧
                 nextFrame.bind(this)();
             })()
-                .catch(err => console.error(err));
+                .catch(err => {
+                    console.error(err);
+                    // 捕获循环已中断，通知页面录制失败（否则录制永远不会完成）
+                    this.stopFlag = true;
+                    ____screencastFailed(err && err.message ? err.message : String(err));
+                });
         }).bind(this)();
     }
 

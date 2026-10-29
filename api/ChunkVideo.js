@@ -45,6 +45,8 @@ export default class ChunkVideo extends VideoChunk {
     #pageAcquireFn = null;
     /** @type {AsyncLock} - 异步锁 */
     #asyncLock = new AsyncLock();
+    /** @type {Function} - 使正在进行的合成失败的函数（未在合成时为null） */
+    #fail = null;
 
     /**
      * 构造函数
@@ -122,7 +124,8 @@ export default class ChunkVideo extends VideoChunk {
     start() {
         this.#abortCallback = null;
         this.#asyncLock.acquire("start", () => this.#synthesize())
-            .catch(err => logger.error(err));
+            // 错误已通过error事件发送
+            .catch(() => {});
     }
 
     /**
@@ -141,6 +144,26 @@ export default class ChunkVideo extends VideoChunk {
         if(!this.#abortCallback)
             return this.#abortCallback;
         this.#abortCallback();
+    }
+
+    /**
+     * 销毁正在进行的合成
+     * 
+     * Unlike abort(), which asks the page to stop capturing and still encodes the frames captured so
+     * far, destroy() does not depend on the page responding: it fails the running synthesis, closes
+     * the page (it is not returned to the pool), kills ffmpeg and removes the swap file and any
+     * unfinished output. startAndWait() rejects with the given error, which is also emitted as error
+     * event. Resolves once everything is cleaned up; does nothing when no synthesis is running.
+     * 
+     * @param {Error} [reason] - 销毁原因
+     * @returns {Promise<void>}
+     */
+    async destroy(reason = new Error("Video synthesis destroyed")) {
+        if (!this.#fail)
+            return;
+        this.#fail(reason);
+        // 等待合成流程完成清理
+        await this.#asyncLock.acquire("start", () => {});
     }
 
     /**
@@ -169,84 +192,123 @@ export default class ChunkVideo extends VideoChunk {
      * 合成处理
      */
     async #synthesize() {
-        const page = await this.#acquirePage();
+        // 合成会话：持有未释放的页面
+        const session = { page: null };
+        // 失败信号：页面崩溃、录制失败、编码器失败或destroy()
+        const failure = new Promise((_resolve, reject) => this.#fail = reject);
+        failure.catch(() => {});
         try {
-            const { url, content, width, height, pageWaitForOptions, pageViewport = {} } = this;
-            // 监听页面实例发生的某些内部错误
-            page.on("error", err => this._emitError("Page error:\n" + err.stack));
-            // 监听页面是否崩溃，当内存不足或过载时可能会崩溃
-            page.on("crashed", err => this.#emitPageCrashedError(err));
-            if (this.consoleLog) {
-                // 监听页面打印到console的正常日志
-                page.on("consoleLog", message => logger.log("[page]", message));
-                // 监听页面打印到console的错误日志
-                page.on("consoleError", err => logger.error("[page]", err));
-            }
-            if (this.videoPreprocessLog)
-                page.on("videoPreprocess", config => logger.log("[video_preprocess]", config.url));
-            page.on("audioAdd", options => {
-                this.addAudio(options);
-                this.emit("audioAdd", options);
-            });
-            page.on("audioUpdate", (audioId, options) => {
-                this.updateAudio(audioId, options);
-                this.emit("audioUpdate", options);
-            })
-            // 设置视窗宽高
-            await page.setViewport({
-                width,
-                height,
-                ...pageViewport
-            });
-            // 跳转到您希望渲染的页面，您可以考虑创建一个本地的Web服务器提供页面以提升加载速度和安全性
-            if (url)
-                await page.goto(url, pageWaitForOptions);
-            // 或者设置页面内容
-            else
-                await page.setContent(content, pageWaitForOptions);
-            // 存在透明通道时设置背景透明度
-            this.hasAlphaChannel && page.setBackgroundOpacity(this.backgroundOpacity);
-            // 存在预处理函数时先执行预处理
-            this.pagePrepareFn && await this.pagePrepareFn(page);
-            // 注册字体
-            if (this.fonts.length > 0)
-                page.registerFonts(this.fonts);
-            // 等待字体加载完成
-            await page.waitForFontsLoaded();
-            // 注册事件序列
-            if (this.timeActions && Object.keys(this.timeActions).length > 0)
-                page.registerTimeActions(this.timeActions);
-             // 注册终止回调
-             this.#abortCallback = () => page.target.evaluate(() => captureCtx.abort()).catch(err => console.error(err));
-            // 启动合成
-            super.start();
-            // 合成完成promise
-            const completedPromise = new Promise(resolve => this.once("completed", resolve));
-            // 监听已渲染的帧输入到合成器
-            page.on("frame", buffer => this.input(buffer));
-            // 启动捕获
-            await page.startScreencast({
-                fps: this.fps,
-                startTime: this.startTime,
-                duration: this.duration,
-                videoDecoderHardwareAcceleration: this.videoDecoderHardwareAcceleration,
-                autostart: this.autostartRender
-            });
-            // 监听并等待录制完成
-            await new Promise(resolve => page.once("screencastCompleted", resolve));
-            // 停止录制
-            await page.stopScreencast();
-            // 释放页面资源
-            await page.release();
-            // 告知合成器结束输入
-            this.endInput();
-            // 等待合成完成
-            return await completedPromise;
+            const acquiring = this.#acquirePage();
+            session.page = await Promise.race([acquiring, failure.catch(err => {
+                // 失败后才获取到的页面直接关闭
+                acquiring.then(lateAcquired => lateAcquired.close()).catch(() => {});
+                throw err;
+            })]);
+            const rendering = this.#render(session.page, failure, session);
+            rendering.catch(() => {});
+            return await Promise.race([rendering, failure]);
         }
         catch (err) {
-            await page.release();
+            // 结束ffmpeg并删除交换文件和未完成的输出
+            await this._cancel(err);
+            // 未释放的页面可能已不可用，关闭而不是释放
+            session.page && await session.page.close().catch(() => {});
             this._emitError(err);
+            throw err;
         }
+        finally {
+            this.#fail = null;
+        }
+    }
+
+    /**
+     * 渲染页面并合成
+     * 
+     * @param {Page} page - 页面对象
+     * @param {Promise} failure - 失败信号
+     * @returns {Promise<Object>} - 合成结果
+     */
+    async #render(page, failure, session) {
+        const fail = this.#fail;
+        const { url, content, width, height, pageWaitForOptions, pageViewport = {} } = this;
+        // 监听页面实例发生的某些内部错误
+        page.on("error", err => this._emitError("Page error:\n" + err.stack));
+        // 监听页面是否崩溃，当内存不足或过载时可能会崩溃
+        page.on("crashed", err => {
+            this.#emitPageCrashedError(err);
+            fail(err);
+        });
+        // 捕获循环中断时录制不会完成
+        page.on("screencastFailed", fail);
+        if (this.consoleLog) {
+            // 监听页面打印到console的正常日志
+            page.on("consoleLog", message => logger.log("[page]", message));
+            // 监听页面打印到console的错误日志
+            page.on("consoleError", err => logger.error("[page]", err));
+        }
+        if (this.videoPreprocessLog)
+            page.on("videoPreprocess", config => logger.log("[video_preprocess]", config.url));
+        page.on("audioAdd", options => {
+            this.addAudio(options);
+            this.emit("audioAdd", options);
+        });
+        page.on("audioUpdate", (audioId, options) => {
+            this.updateAudio(audioId, options);
+            this.emit("audioUpdate", options);
+        })
+        // 设置视窗宽高
+        await page.setViewport({
+            width,
+            height,
+            ...pageViewport
+        });
+        // 跳转到您希望渲染的页面，您可以考虑创建一个本地的Web服务器提供页面以提升加载速度和安全性
+        if (url)
+            await page.goto(url, pageWaitForOptions);
+        // 或者设置页面内容
+        else
+            await page.setContent(content, pageWaitForOptions);
+        // 存在透明通道时设置背景透明度
+        this.hasAlphaChannel && page.setBackgroundOpacity(this.backgroundOpacity);
+        // 存在预处理函数时先执行预处理
+        this.pagePrepareFn && await this.pagePrepareFn(page);
+        // 注册字体
+        if (this.fonts.length > 0)
+            page.registerFonts(this.fonts);
+        // 等待字体加载完成
+        await page.waitForFontsLoaded();
+        // 注册事件序列
+        if (this.timeActions && Object.keys(this.timeActions).length > 0)
+            page.registerTimeActions(this.timeActions);
+         // 注册终止回调
+         this.#abortCallback = () => page.target.evaluate(() => captureCtx.abort()).catch(err => console.error(err));
+        // 启动合成
+        super.start();
+        // 编码器失败时合成失败
+        this._synthesis.catch(fail);
+        // 监听已渲染的帧输入到合成器
+        page.on("frame", buffer => this.input(buffer));
+        // 录制完成promise（在启动捕获前监听，避免错过事件）
+        const screencastCompleted = new Promise(resolve => page.once("screencastCompleted", resolve));
+        // 启动捕获
+        await page.startScreencast({
+            fps: this.fps,
+            startTime: this.startTime,
+            duration: this.duration,
+            videoDecoderHardwareAcceleration: this.videoDecoderHardwareAcceleration,
+            autostart: this.autostartRender
+        });
+        // 等待录制完成
+        await Promise.race([screencastCompleted, failure]);
+        // 停止录制
+        await page.stopScreencast();
+        // 释放页面资源
+        await page.release();
+        session.page = null;
+        // 告知合成器结束输入
+        this.endInput();
+        // 等待合成完成
+        return await this._synthesis;
     }
 
     /**

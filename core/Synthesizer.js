@@ -109,6 +109,18 @@ export default class Synthesizer extends EventEmitter {
     #pipeStream = null;
     /** @type {FfmpegCommand} - 当前编码器 */
     #encoder = null;
+    /** @type {Promise<Object>} - 合成过程（解决为合成结果，失败或取消时拒绝） */
+    #run = null;
+    /** @type {Error} - 取消原因（已取消时不再接收帧，也不再发送error/completed事件） */
+    #cancelReason = null;
+    /** @type {Function} - 取消信号的拒绝函数 */
+    #rejectCancelSignal = null;
+    /** @type {Promise} - 取消信号 */
+    #cancelSignal = null;
+    /** @type {boolean} - 编码器是否已开始写入输出路径 */
+    #outputWritten = false;
+    /** @type {WeakSet<Error>} - 已发送的错误（同一错误只发送一次） */
+    #emittedErrors = new WeakSet();
 
     /**
      * 构造函数
@@ -212,14 +224,19 @@ export default class Synthesizer extends EventEmitter {
         if (!this.#pipeStream)
             this.#pipeStream = new PassThrough();
         assert(this.isReady(), "Synthesizer status is not READY, please reset the synthesizer: synthesizer.reset()");
+        assert(!this.#cancelReason, "Synthesizer has been aborted, please reset the synthesizer: synthesizer.reset()");
         this.#setState(Synthesizer.STATE.SYNTHESIZING);
         this._startupTime = _.defaultTo(this._startupTime, performance.now());
         this._targetFrameCount = util.durationToFrameCount(this.duration, this.fps);
-        (async () => {
-            await fs.ensureDir(path.dirname(this.outputPath));
-            await fs.ensureDir(this.tmpDirPath);
+        this.#cancelSignal = new Promise((_resolve, reject) => this.#rejectCancelSignal = reject);
+        this.#cancelSignal.catch(() => {});
+        this.#run = (async () => {
+            await this.#untilCancelled(fs.ensureDir(path.dirname(this.outputPath)));
+            await this.#untilCancelled(fs.ensureDir(this.tmpDirPath));
             // 等待启动前已添加的音频加载完成
-            await this.#waitForAudiosLoaded();
+            await this.#untilCancelled(this.#waitForAudiosLoaded());
+            // 分块视频由视频编码器直接写入输出路径
+            this.#outputWritten = this._isVideoChunk();
             await new Promise((resolve, reject) => {
                 this._createVideoEncoder()
                     .once("start", cmd => util.ffmpegLog(cmd))
@@ -233,10 +250,12 @@ export default class Synthesizer extends EventEmitter {
                     .once("end", resolve)
                     .run();
             });
+            this.#throwIfCancelled();
             if (!this._isVideoChunk()) {
                 if (this.audioSynthesis) {
                     // 等待渲染期间新添加的音频加载完成
-                    await this.#waitForAudiosLoaded();
+                    await this.#untilCancelled(this.#waitForAudiosLoaded());
+                    this.#outputWritten = true;
                     await new Promise((resolve, reject) => {
                         this._createAudioEncoder()
                             .once("start", cmd => util.ffmpegLog(cmd))
@@ -245,24 +264,98 @@ export default class Synthesizer extends EventEmitter {
                             .once("end", resolve)
                             .run();
                     });
+                    this.#throwIfCancelled();
                     await fs.remove(this._swapFilePath);
                 }
-                else
+                else {
+                    this.#throwIfCancelled();
+                    this.#outputWritten = true;
                     await fs.move(this._swapFilePath, this.outputPath, { overwrite: true });
+                }
             }
             this.coverCapture && await this.#captureCover();
+            this.#throwIfCancelled();
             this.#setState(Synthesizer.STATE.COMPLETED);
-            this._emitCompleted();
-        })()
-            .catch(err => this._emitError(err));
+            return this._emitCompleted();
+        })();
+        // 失败时发送错误事件（取消时不发送）
+        this.#run.catch(err => !this.#cancelReason && this._emitError(err));
     }
 
     /**
      * 终止合成
+     * 
+     * 停止接收帧，结束ffmpeg进程（未启动的ffmpeg会收到输入结束），等待合成过程结束后删除交换文件和未完成的输出文件。
+     * 取消后不再发送completed和error事件，再次启动前需要调用reset()。
+     * 
+     * @param {Error} [reason] - 终止原因
+     * @returns {Promise<void>} - 清理完成后解决，不会拒绝
      */
-    abort() {
-        this.#drain();
-        this.#closeEncoder(true);
+    async abort(reason) {
+        await this._cancel(reason);
+    }
+
+    /**
+     * 取消合成（见abort）
+     * 
+     * @protected
+     * @param {Error} [reason] - 取消原因
+     * @returns {Promise<void>} - 清理完成后解决，不会拒绝
+     */
+    async _cancel(reason = new Error("Synthesis aborted")) {
+        try {
+            if (!this.#cancelReason) {
+                this.#cancelReason = reason;
+                this.#rejectCancelSignal && this.#rejectCancelSignal(reason);
+                // 丢弃未写入的帧并结束管道
+                this.#frameBufferIndex = 0;
+                if (this.#pipeStream && !this.#pipeStream.writableEnded)
+                    this.#pipeStream.end();
+                // 结束正在运行的ffmpeg进程
+                const proc = this.#encoder && this.#encoder.ffmpegProc;
+                if (proc && proc.exitCode === null && proc.signalCode === null)
+                    proc.kill("SIGKILL");
+                if (this._cliProgress) {
+                    this._cliProgress.stop();
+                    this._cliProgress = null;
+                }
+            }
+            // 等待合成过程结束，之后不会再有写入
+            this.#run && await this.#run.catch(() => {});
+            await fs.remove(this._swapFilePath);
+            this.#outputWritten && await fs.remove(this.outputPath);
+        }
+        catch (err) {
+            logger.error(err);
+        }
+    }
+
+    /**
+     * 合成过程（解决为合成结果，失败或取消时拒绝；未启动时为null）
+     * 
+     * @protected
+     * @returns {Promise<Object>}
+     */
+    get _synthesis() {
+        return this.#run;
+    }
+
+    /**
+     * 等待promise，取消时立即以取消原因拒绝
+     * 
+     * @param {Promise} promise
+     */
+    async #untilCancelled(promise) {
+        this.#throwIfCancelled();
+        return await Promise.race([promise, this.#cancelSignal]);
+    }
+
+    /**
+     * 已取消时抛出取消原因
+     */
+    #throwIfCancelled() {
+        if (this.#cancelReason)
+            throw this.#cancelReason;
     }
 
     /**
@@ -271,6 +364,9 @@ export default class Synthesizer extends EventEmitter {
      * @param {Buffer} buffer - 帧缓冲区
      */
     input(buffer) {
+        // 已取消时丢弃帧
+        if (this.#cancelReason)
+            return;
         if (!this.#pipeStream)
             this.#pipeStream = new PassThrough();
         this.#frameBuffers[this.#frameBufferIndex] = buffer;
@@ -285,6 +381,9 @@ export default class Synthesizer extends EventEmitter {
      * 结束帧输入
      */
     endInput() {
+        // 已取消时管道已结束
+        if (this.#cancelReason)
+            return;
         this.#drain();
         this.#closeEncoder();
     }
@@ -369,6 +468,10 @@ export default class Synthesizer extends EventEmitter {
     _emitError(err) {
         if (_.isString(err))
             err = new Error(err);
+        // 同一错误只发送一次（例如编码器错误同时导致合成失败时）
+        if (this.#emittedErrors.has(err))
+            return;
+        this.#emittedErrors.add(err);
         const message = err.message;
         if (message.indexOf("Error while opening encoder for output stream") != -1 || message.indexOf("ffmpeg exited with code 3221225477") != -1)
             err = new Error(`Video codec ${this.videoEncoder} may not be supported, please check if your hardware supports it: https://github.com/Vinlic/WebVideoCreator/blob/master/docs/video-encoder.md. Some hardware encoders may have limitations in parallel encoding (such as NVENC https://github.com/keylase/nvidia-patch)`);
@@ -596,6 +699,11 @@ export default class Synthesizer extends EventEmitter {
         this._frameCount = 0;
         this._startupTime = null;
         this.#closeEncoder(true);
+        this.#run = null;
+        this.#cancelReason = null;
+        this.#cancelSignal = null;
+        this.#rejectCancelSignal = null;
+        this.#outputWritten = false;
         if (this.#pipeStream && !this.#pipeStream.closed)
             this.#pipeStream.end();
         this.#pipeStream = null;

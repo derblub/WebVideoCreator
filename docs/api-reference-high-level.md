@@ -408,7 +408,11 @@
 
 ### SingleVideo.startAndWait(): Promise<result>
 
-启动单幕渲染合成并等待完成，返回合成结果（同 completed 事件的 result）
+启动单幕渲染合成并等待完成，返回合成结果（同 completed 事件的 result）。合成失败（页面崩溃或关闭、捕获中断、编码器错误、destroy()）时以该错误拒绝，同时发送 error 事件
+
+### SingleVideo.destroy(reason?: Error): Promise
+
+立即终止正在进行的合成，不依赖页面响应（与 abort() 不同，abort() 请求页面停止捕获并仍会合成已捕获的帧）：关闭页面（不归还资源池）、结束 ffmpeg 进程、删除交换文件和未完成的输出。startAndWait() 以 reason 拒绝。清理完成后解决；未在合成时不做任何操作。
 
 <br>
 
@@ -848,7 +852,11 @@
 
 ### ChunkVideo.startAndWait(): Promise<result>
 
-启动分块视频渲染合成并等待完成，返回合成结果（同 completed 事件的 result）
+启动分块视频渲染合成并等待完成，返回合成结果（同 completed 事件的 result）。合成失败（页面崩溃或关闭、捕获中断、编码器错误、destroy()）时以该错误拒绝，同时发送 error 事件
+
+### ChunkVideo.destroy(reason?: Error): Promise
+
+立即终止正在进行的合成，不依赖页面响应（与 abort() 不同，abort() 请求页面停止捕获并仍会合成已捕获的帧）：关闭页面（不归还资源池）、结束 ffmpeg 进程、删除交换文件和未完成的输出。startAndWait() 以 reason 拒绝。清理完成后解决；未在合成时不做任何操作。
 
 # Audio
 

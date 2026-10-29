@@ -506,9 +506,9 @@ const { ... } = core;
 
 启动合成。
 
-### Synthesizer.abort()
+### Synthesizer.abort(reason?: Error): Promise
 
-终止合成，非特殊情况一般不要中断渲染。
+终止合成，非特殊情况一般不要中断渲染。停止接收帧并结束 ffmpeg 进程，等待合成过程结束后删除交换文件和未完成的输出文件；之后不再发送 completed 和 error 事件，再次启动前需调用 reset()。返回的 Promise 在清理完成后解决，不会拒绝。
 
 ### Synthesizer.input(buffer: Buffer)
 

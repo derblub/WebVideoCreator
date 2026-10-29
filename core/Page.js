@@ -106,6 +106,8 @@ export default class Page extends EventEmitter {
     #asyncLock = new AsyncLock();
     /** @type {Buffer} - 最近一次捕获的帧图（BeginFrame无画面变化时重复使用） */
     #lastFrame = null;
+    /** @type {boolean} - 当前录制是否已结束（完成或失败） */
+    #screencastSettled = true;
 
     /**
      * 构造函数
@@ -358,6 +360,7 @@ export default class Page extends EventEmitter {
             // 页面进入捕获中状态
             this.#setState(Page.STATE.CAPTURING);
             this.#lastFrame = null;
+            this.#screencastSettled = false;
             // 当当前视图与设定不一致时进行调整
             const { width, height, ..._options } = this.target.viewport() || {};
             if (width != this.width || height != this.height)
@@ -409,6 +412,8 @@ export default class Page extends EventEmitter {
      */
     async stopScreencast() {
         await this.#asyncLock.acquire("stopScreencast", async () => {
+            // 主动停止的录制不再视为失败
+            this.#screencastSettled = true;
             await this.target.evaluate(async () => captureCtx.stopFlag = true);
             await this.#endCDPSession();
             this.#lastFrame = null;
@@ -456,13 +461,36 @@ export default class Page extends EventEmitter {
             this.emit("crashed", err);
         else
             logger.error("Page crashed:", err);
+        this.#emitScreencastFailed(err);
     }
 
     /**
      * 发送录制完成事件
      */
     #emitScreencastCompleted() {
+        if (this.#screencastSettled)
+            return;
+        this.#screencastSettled = true;
         this.emit("screencastCompleted");
+    }
+
+    /**
+     * 发送录制失败事件
+     * 
+     * The capture loop has stopped for good (capture error, crash, lost page context, page closed),
+     * so screencastCompleted will never follow. Emitted at most once per screencast; without a
+     * listener the error is reported as a page error.
+     * 
+     * @param {Error} err - 错误对象
+     */
+    #emitScreencastFailed(err) {
+        if (this.#screencastSettled)
+            return;
+        this.#screencastSettled = true;
+        if (this.eventNames().indexOf("screencastFailed") != -1)
+            this.emit("screencastFailed", err);
+        else
+            this.#emitError(err);
     }
 
     /**
@@ -493,7 +521,7 @@ export default class Page extends EventEmitter {
         this.target.on("domcontentloaded", async () => {
             // 如果处于录制状态作为被动刷新处理
             if (this.isCapturing())
-                this.#emitError(new Error("Page context is missing, possibly due to the page being refreshed"))
+                this.#emitScreencastFailed(new Error("Page context is missing, possibly due to the page being refreshed"))
         });
         // 页面请求处理
         this.target.on("request", this.#requestHandle.bind(this));
@@ -507,6 +535,8 @@ export default class Page extends EventEmitter {
         this.target.once("close", this.close.bind(this));
         // 暴露录制完成函数
         await this.target.exposeFunction("____screencastCompleted", this.#emitScreencastCompleted.bind(this));
+        // 暴露录制失败函数
+        await this.target.exposeFunction("____screencastFailed", (message = "") => this.#emitScreencastFailed(new Error(`Capture loop failed: ${message}`)));
         // 暴露CSS动画控制函数
         await this.target.exposeFunction("____seekCSSAnimations", this.#seekCSSAnimations.bind(this));
         // 暴露动作序列
@@ -680,7 +710,8 @@ export default class Page extends EventEmitter {
             return true;
         }
         catch (err) {
-            this.#emitError(err);
+            // 捕获循环将停止，录制不会完成
+            this.#emitScreencastFailed(err);
             return false;
         }
     }
@@ -910,6 +941,8 @@ export default class Page extends EventEmitter {
         await this.#asyncLock.acquire("close", async () => {
             if (this.isClosed())
                 return;
+            // 录制中关闭页面时录制不会完成
+            this.#emitScreencastFailed(new Error("Page closed during capture"));
             // 设置页面状态为closed
             this.#setState(Page.STATE.CLOSED);
             // 通知浏览器页面池销毁页面资源
@@ -952,6 +985,7 @@ export default class Page extends EventEmitter {
     #removeListeners() {
         this.removeAllListeners("frame");
         this.removeAllListeners("screencastCompleted");
+        this.removeAllListeners("screencastFailed");
         this.removeAllListeners("consoleLog");
         this.removeAllListeners("consoleError");
         this.removeAllListeners("resourceAccepted");
