@@ -127,9 +127,11 @@ export default class ChunkVideo extends VideoChunk {
 
     /**
      * 启动并等待完成
+     * 
+     * @returns {Promise<Object>} - 合成结果（同completed事件参数）
      */
     async startAndWait() {
-        await this.#asyncLock.acquire("start", () => this.#synthesize());
+        return await this.#asyncLock.acquire("start", () => this.#synthesize());
     }
 
     /**
@@ -239,7 +241,7 @@ export default class ChunkVideo extends VideoChunk {
             // 告知合成器结束输入
             this.endInput();
             // 等待合成完成
-            await completedPromise;
+            return await completedPromise;
         }
         catch (err) {
             await page.release();

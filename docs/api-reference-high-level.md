@@ -362,7 +362,7 @@
 
 ### completed
 
-已完成合成事件，回调参数：(result)
+已完成合成事件，回调参数：(result)，result 为 { takes, duration, outputPath, rtf, frameCount }（frameCount 为写入编码器的帧数）
 
 ### error
 
@@ -406,9 +406,9 @@
 
 启动单幕渲染合成
 
-### SingleVideo.startAndWait(): Promise
+### SingleVideo.startAndWait(): Promise<result>
 
-启动单幕渲染合成并等待完成
+启动单幕渲染合成并等待完成，返回合成结果（同 completed 事件的 result）
 
 <br>
 
@@ -552,7 +552,7 @@
 
 ### completed
 
-已完成合成事件，回调参数：(result)
+已完成合成事件，回调参数：(result)，result 为 { takes, duration, outputPath, rtf, frameCount }（frameCount 为写入编码器的帧数）
 
 ### error
 
@@ -608,9 +608,9 @@
 
 启动多幕视频渲染合成，如果输入的分块视频已经合成完毕则会跳过渲染进入合成阶段
 
-### MultiVideo.startAndWait(): Promise
+### MultiVideo.startAndWait(): Promise<result>
 
-启动多幕视频渲染合成并等待完成
+启动多幕视频渲染合成并等待完成，返回合成结果（同 completed 事件的 result）
 
 <br>
 
@@ -794,7 +794,7 @@
 
 ### completed
 
-已完成合成事件，回调参数：(result)
+已完成合成事件，回调参数：(result)，result 为 { takes, duration, outputPath, rtf, frameCount }（frameCount 为写入编码器的帧数）
 
 ### error
 
@@ -846,9 +846,9 @@
 
 启动分块视频渲染合成，分块视频渲染后还需要输入到 [MultiVideo](#multivideo) 进行最终视频合成
 
-### ChunkVideo.startAndWait(): Promise
+### ChunkVideo.startAndWait(): Promise<result>
 
-启动分块视频渲染合成并等待完成
+启动分块视频渲染合成并等待完成，返回合成结果（同 completed 事件的 result）
 
 # Audio
 

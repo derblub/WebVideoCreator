@@ -338,6 +338,7 @@ export default class Synthesizer extends EventEmitter {
      * 发送已完成事件
      * 
      * @protected
+     * @returns {{takes: number, duration: number, outputPath: string, rtf: number, frameCount: number}} - 合成结果（同completed事件参数）
      */
     _emitCompleted() {
         this._emitProgress(100);
@@ -352,9 +353,11 @@ export default class Synthesizer extends EventEmitter {
             takes,
             duration: outputDuration,
             outputPath: this.outputPath,
-            rtf: outputDuration / takes
+            rtf: outputDuration / takes,
+            frameCount: this._frameCount
         };
         this.emit("completed", result);
+        return result;
     }
 
     /**

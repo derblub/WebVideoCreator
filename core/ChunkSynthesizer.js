@@ -204,7 +204,7 @@ export default class ChunkSynthesizer extends Synthesizer {
     _emitCompleted() {
         Promise.all(this.chunks.map(chunk => chunk.autoremove && fs.remove(chunk.outputPath)))
             .catch(err => logger.error(err));
-        super._emitCompleted();
+        return super._emitCompleted();
     }
 
     /**
