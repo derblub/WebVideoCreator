@@ -193,8 +193,10 @@ export default class Browser {
         });
         this.#pagePool.on('factoryCreateError', (error) => {
             const client = this.#pagePool._waitingClientsQueue.dequeue();
-            if (!client) return logger.error(error);
-            client.reject(error);
+            if (client) return client.reject(error);
+            // The pool refills to its minimum after pages are destroyed; that fails once the browser is closing
+            if (!this.isClosed())
+                logger.error(error);
         });
     }
 
@@ -221,6 +223,9 @@ export default class Browser {
      * @returns {Page} - 页面资源
      */
     async #createPage() {
+        // Do not open new tabs while or after closing (target is null then and would wait for a launch forever)
+        if (this.isClosed())
+            throw new Error(`Browser ${this.id} is closed`);
         if (!this.target)
             await new Promise(resolve => this.#launchCallbacks.push(resolve));
         const page = new Page(this, { ...this.pageOptions, _firstPage: this.firstPage });
