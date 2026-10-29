@@ -127,11 +127,21 @@ export default class MultiVideo extends ChunkSynthesizer {
             if (this.fonts.length > 0)
                 chunk.registerFonts(this.fonts);
         });
-        return await new Promise((resolve, reject) => {
-            this.once("error", reject);
-            this.once("completed", resolve);
-            super.start();
-        });
+        let onError, onCompleted;
+        try {
+            return await new Promise((resolve, reject) => {
+                onError = reject;
+                onCompleted = resolve;
+                this.once("error", onError);
+                this.once("completed", onCompleted);
+                super.start();
+            });
+        }
+        finally {
+            // 移除未触发的一次性监听器，避免重复启动时累积
+            this.off("error", onError);
+            this.off("completed", onCompleted);
+        }
     }
 
     /**
