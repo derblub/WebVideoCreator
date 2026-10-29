@@ -97,7 +97,7 @@ export default class Browser {
         const { numPageMax, numPageMin, executablePath, useGPU, useAngle, disableDevShm, args, pageOptions } = options;
         assert(_.isUndefined(numPageMax) || _.isFinite(numPageMax), "Browser numPageMax must be number");
         assert(_.isUndefined(numPageMin) || _.isFinite(numPageMin), "Browser numPageMin must be number");
-        assert(_.isUndefined(executablePath) || _.isBoolean(executablePath), "Browser executablePath must be string");
+        assert(_.isUndefined(executablePath) || _.isString(executablePath), "Browser executablePath must be string");
         assert(_.isUndefined(useGPU) || _.isBoolean(useGPU), "Browser useGPU must be boolean");
         assert(_.isUndefined(useAngle) || _.isBoolean(useAngle), "Browser useAngle must be boolean");
         assert(_.isUndefined(disableDevShm) || _.isBoolean(disableDevShm), "Browser disableDevShm must be boolean");
