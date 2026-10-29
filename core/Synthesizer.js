@@ -239,7 +239,7 @@ export default class Synthesizer extends EventEmitter {
             this.#outputWritten = this._isVideoChunk();
             await new Promise((resolve, reject) => {
                 this._createVideoEncoder()
-                    .once("start", cmd => util.ffmpegLog(cmd))
+                    .once("start", cmd => this.#onEncoderStart(cmd))
                     .on("progress", e => {
                         if (!this._targetFrameCount)
                             return this._emitProgress(0, 0, 0);
@@ -258,7 +258,7 @@ export default class Synthesizer extends EventEmitter {
                     this.#outputWritten = true;
                     await new Promise((resolve, reject) => {
                         this._createAudioEncoder()
-                            .once("start", cmd => util.ffmpegLog(cmd))
+                            .once("start", cmd => this.#onEncoderStart(cmd))
                             .on("progress", e => this._emitProgress(98 + ((e.percent || 0) * 0.02), this._targetFrameCount, this._targetFrameCount))
                             .once("error", reject)
                             .once("end", resolve)
@@ -348,6 +348,21 @@ export default class Synthesizer extends EventEmitter {
     async #untilCancelled(promise) {
         this.#throwIfCancelled();
         return await Promise.race([promise, this.#cancelSignal]);
+    }
+
+    /**
+     * 编码器进程已启动
+     * 
+     * fluent-ffmpeg spawns ffmpeg asynchronously after run(); a cancel in that window finds no process
+     * to kill, so a process that starts after the cancel is killed right away.
+     * 
+     * @param {string} cmd - ffmpeg命令行
+     */
+    #onEncoderStart(cmd) {
+        util.ffmpegLog(cmd);
+        const proc = this.#encoder && this.#encoder.ffmpegProc;
+        if (this.#cancelReason && proc && proc.exitCode === null && proc.signalCode === null)
+            proc.kill("SIGKILL");
     }
 
     /**
