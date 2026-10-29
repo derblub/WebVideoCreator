@@ -195,10 +195,16 @@ export default class SingleVideo extends Synthesizer {
         const failure = new Promise((_resolve, reject) => this.#fail = reject);
         failure.catch(() => {});
         try {
-            const acquiring = this.#acquirePage();
+            let acquired = false;
+            const acquiring = this.#acquirePage().then(page => {
+                acquired = true;
+                return page;
+            });
             session.page = await Promise.race([acquiring, failure.catch(err => {
-                // 失败后才获取到的页面直接关闭
-                acquiring.then(lateAcquired => lateAcquired.close()).catch(() => {});
+                // 仅当失败先于页面获取时，才关闭之后获取到的页面（已获取的页面由下面的清理处理，
+                // 已释放回资源池的页面可能已被其他合成使用，不能关闭）
+                if (!acquired)
+                    acquiring.then(lateAcquired => lateAcquired.close()).catch(() => {});
                 throw err;
             })]);
             const rendering = this.#render(session.page, failure, session);
@@ -294,8 +300,9 @@ export default class SingleVideo extends Synthesizer {
         // 停止录制
         await page.stopScreencast();
         // 释放页面资源
-        await page.release();
+        // 先解除会话对页面的持有：释放期间发生的失败不能再关闭这个页面，否则已关闭的页面会回到资源池
         session.page = null;
+        await page.release();
         // 告知合成器结束输入
         this.endInput();
         // 等待合成完成
