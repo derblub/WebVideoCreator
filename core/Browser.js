@@ -265,15 +265,20 @@ export default class Browser {
                 return;
             // 设置浏览器状态为已关闭
             this.#setState(Browser.STATE.CLOSED);
-            // 清除页面池资源
-            await this.#pagePool.clear();
-            // 通知浏览器资源池销毁资源
-            await this.parent.destoryBrowser(this);
-            // 如果浏览器已关闭则跳过
-            if (!this.target || this.target.isClosed())
-                return;
-            this.target.close();
-            this.target = null;
+            try {
+                // 清除页面池资源
+                await this.#pagePool.clear();
+                // 通知浏览器资源池销毁资源
+                await this.parent.destoryBrowser(this);
+            }
+            finally {
+                // Close Chrome even if the pool bookkeeping above fails, so no browser process is left behind.
+                // puppeteer-core >= 22 has no Browser.isClosed(); `connected` is false once the browser is gone.
+                const target = this.target;
+                this.target = null;
+                if (target && target.connected)
+                    await target.close().catch(err => logger.error(`Browser ${this.id} target close error:`, err));
+            }
         });
     }
 

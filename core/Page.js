@@ -945,13 +945,17 @@ export default class Page extends EventEmitter {
             this.#emitScreencastFailed(new Error("Page closed during capture"));
             // 设置页面状态为closed
             this.#setState(Page.STATE.CLOSED);
-            // 通知浏览器页面池销毁页面资源
-            await this.parent.destoryPage(this);
-            // 如果页面已关闭则跳过
-            if (!this.target || this.target.isClosed())
-                return;
-            this.target.close();
-            this.target = null;
+            try {
+                // 通知浏览器页面池销毁页面资源
+                await this.parent.destoryPage(this);
+            }
+            finally {
+                // Close the tab even if the pool bookkeeping above fails; skip it once the page or browser is gone.
+                const target = this.target;
+                this.target = null;
+                if (target && !target.isClosed() && target.browser().connected)
+                    await target.close().catch(err => logger.error(`Page ${this.id} target close error:`, err));
+            }
         });
     }
 
