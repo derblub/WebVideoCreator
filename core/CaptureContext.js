@@ -53,7 +53,13 @@ export default class CaptureContext {
         /** @type {number} - 总时长 */
         duration: null,
         /** @type {number} - 目标总帧数 */
-        frameCount: null
+        frameCount: null,
+        /**
+         * @type {boolean} - Insert the capture helper element. Only BeginFrame capture needs it (it keeps
+         * producing frames); it is a visible pixel at (0,0) (opacity 0.1), so screenshot capture
+         * (compatibleRenderingMode) turns it off to keep transparent frames clean.
+         */
+        captureHelper: true
     };
     /** @type {SvgAnimation[]|VideoCanvas[]|DynamicImage[]|LottieCanvas[]} - 媒体调度列表 */
     dispatchMedias = [];
@@ -115,8 +121,9 @@ export default class CaptureContext {
         }
         // 检查配置
         this._checkConfig();
-        // 插入捕获辅助元素
-        this._insertCaptureHelper();
+        // 插入捕获辅助元素（仅BeginFrame捕获需要）
+        if (this.config.captureHelper !== false)
+            this._insertCaptureHelper();
         // 转换元素为媒体元素
         this._convertElementsToMedias();
         // 监听媒体插入

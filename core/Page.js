@@ -366,7 +366,11 @@ export default class Page extends EventEmitter {
                 Object.assign(captureCtx.config, config);
                 // 如果准备后还未启动且自动启动选项开启时渲染则开始
                 !captureCtx.ready() && captureCtx.config.autostart && captureCtx.start();
-            }, _.pickBy({ fps, startTime, duration, frameCount, autostart, videoDecoderHardwareAcceleration }, v => !_.isUndefined(v)));
+            }, _.pickBy({
+                fps, startTime, duration, frameCount, autostart, videoDecoderHardwareAcceleration,
+                // Screenshot capture always yields an image; the helper would only leave a visible pixel at (0,0)
+                captureHelper: !globalConfig.compatibleRenderingMode
+            }, v => !_.isUndefined(v)));
         });
     }
 
