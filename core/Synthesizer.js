@@ -303,7 +303,8 @@ export default class Synthesizer extends EventEmitter {
         if (!this.#pipeStream)
             return;
         if (this.#frameBufferIndex > 0)
-            this.#pipeStream.write(Buffer.concat(this.#frameBuffers.filter(v => v)));
+            // Only the frames of the current batch: slots after #frameBufferIndex still hold frames of the previous batch
+            this.#pipeStream.write(Buffer.concat(this.#frameBuffers.slice(0, this.#frameBufferIndex)));
         this.#frameBufferIndex = 0;
         if (!this.#pipeStream.closed)
             this.#pipeStream.end();
