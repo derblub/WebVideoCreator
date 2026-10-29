@@ -394,13 +394,18 @@ export default class Synthesizer extends EventEmitter {
 
     /**
      * 结束帧输入
+     * 
+     * Writes the remaining frames and ends the frame pipe; ffmpeg reads EOF after the last frame,
+     * finishes encoding and exits ("end"). Nothing else is written to ffmpeg's stdin: it is the
+     * frame pipe (image2pipe from pipe:0), ffmpeg does not read keys from it, and a "q" written
+     * there directly overtakes frames still queued in the pipe and corrupts a PNG (lost frame).
+     * The encoder stays referenced so that a cancel during the final encoding can still kill it.
      */
     endInput() {
         // 已取消时管道已结束
         if (this.#cancelReason)
             return;
         this.#drain();
-        this.#closeEncoder();
     }
 
     /**
@@ -669,18 +674,19 @@ export default class Synthesizer extends EventEmitter {
     }
 
     /**
-     * 关闭编码器
+     * 强制终止编码器
      * 
-     * @param {boolean} abort - 是否强制终止
+     * Removes the "end" listeners and kills a still running ffmpeg process with SIGKILL, like a
+     * cancel does. A "q" on stdin is no way to stop it: for the video encoder stdin is the frame
+     * pipe, where ffmpeg takes it as frame data.
      */
-    #closeEncoder(abort = false) {
+    #killEncoder() {
         if (!this.#encoder)
             return;
-        // 如果为强制终止则移除结束事件
-        abort && this.#encoder.removeAllListeners("end");
-        // 强制退出
-        if (this.#encoder.ffmpegProc)
-            this.#encoder.ffmpegProc.stdin.write("q");
+        this.#encoder.removeAllListeners("end");
+        const proc = this.#encoder.ffmpegProc;
+        if (proc && proc.exitCode === null && proc.signalCode === null)
+            proc.kill("SIGKILL");
         this.#encoder = null;
     }
 
@@ -713,7 +719,7 @@ export default class Synthesizer extends EventEmitter {
         this.#frameBuffers = new Array(this.parallelWriteFrames);
         this._frameCount = 0;
         this._startupTime = null;
-        this.#closeEncoder(true);
+        this.#killEncoder();
         this.#run = null;
         this.#cancelReason = null;
         this.#cancelSignal = null;
