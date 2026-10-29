@@ -62,6 +62,9 @@ export default class Page extends EventEmitter {
         CLOSED: Symbol("CLOSED")
     };
 
+    /** BeginFrame未返回截图且没有可重复的上一帧时的重试次数 */
+    static BEGIN_FRAME_SCREENSHOT_RETRIES = 3;
+
     id = `Page@${pageIndex++}`;
     /** @type {Page.STATE} */
     state = Page.STATE.UNINITIALIZED;
@@ -101,6 +104,8 @@ export default class Page extends EventEmitter {
     #firstPage = false;
     /** @type {AsyncLock} - */
     #asyncLock = new AsyncLock();
+    /** @type {Buffer} - 最近一次捕获的帧图（BeginFrame无画面变化时重复使用） */
+    #lastFrame = null;
 
     /**
      * 构造函数
@@ -352,6 +357,7 @@ export default class Page extends EventEmitter {
                 duration = util.frameCountToDuration(frameCount, fps);
             // 页面进入捕获中状态
             this.#setState(Page.STATE.CAPTURING);
+            this.#lastFrame = null;
             // 当当前视图与设定不一致时进行调整
             const { width, height, ..._options } = this.target.viewport() || {};
             if (width != this.width || height != this.height)
@@ -405,6 +411,7 @@ export default class Page extends EventEmitter {
         await this.#asyncLock.acquire("stopScreencast", async () => {
             await this.target.evaluate(async () => captureCtx.stopFlag = true);
             await this.#endCDPSession();
+            this.#lastFrame = null;
             this.#setState(Page.STATE.STOPPED);
         });
     }
@@ -602,6 +609,38 @@ export default class Page extends EventEmitter {
             this.#setState(Page.STATE.UNAVAILABLED);
             throw new Error("beginFrame wait timeout");
         }
+        // 跳过的帧可能改变了画面，之前捕获的帧不再代表当前画面
+        this.#lastFrame = null;
+    }
+
+    /**
+     * 通过BeginFrame渲染一帧并请求截图
+     * 
+     * @param {string} frameFormat - 帧图格式（jpeg/png）
+     * @returns {Object} - BeginFrame结果（无画面时screenshotData为空）
+     */
+    async #beginFrameWithScreenshot(frameFormat) {
+        let timer;
+        // 帧数据捕获
+        const frameData = await Promise.race([
+            this.#cdpSession.send("HeadlessExperimental.beginFrame", {
+                screenshot: {
+                    // 帧图格式（jpeg, png)
+                    format: frameFormat,
+                    // 帧图质量（0-100）
+                    quality: frameFormat == "jpeg" ? this.frameQuality : undefined
+                }
+            }),
+            // 帧渲染超时处理
+            new Promise(resolve => timer = setTimeout(() => resolve(false), this.beginFrameTimeout))
+        ]);
+        clearTimeout(timer);
+        // 帧渲染超时处理
+        if (frameData === false) {
+            this.#setState(Page.STATE.UNAVAILABLED);
+            throw new Error("beginFrame wait timeout");
+        }
+        return frameData || {};
     }
 
     /**
@@ -612,28 +651,22 @@ export default class Page extends EventEmitter {
             // 非兼容渲染模式使用BeginFrame API进行捕获否则使用截图API
             const frameFormat = this.backgroundOpacity < 1 ? "png" : this.frameFormat;
             if (!globalConfig.compatibleRenderingMode) {
-                let timer;
-                // 帧数据捕获
-                const frameData = await Promise.race([
-                    this.#cdpSession.send("HeadlessExperimental.beginFrame", {
-                        screenshot: {
-                            // 帧图格式（jpeg, png)
-                            format: frameFormat,
-                            // 帧图质量（0-100）
-                            quality: frameFormat == "jpeg" ? this.frameQuality : undefined
-                        }
-                    }),
-                    // 帧渲染超时处理
-                    new Promise(resolve => timer = setTimeout(() => resolve(false), this.beginFrameTimeout))
-                ]);
-                clearTimeout(timer);
-                // 帧渲染超时处理
-                if (frameData === false) {
-                    this.#setState(Page.STATE.UNAVAILABLED);
-                    throw new Error("beginFrame wait timeout");
+                let frameData = await this.#beginFrameWithScreenshot(frameFormat);
+                // BeginFrame returns no screenshot when the frame has no damage (nothing changed since the
+                // last frame) or while the renderer is still initialising. Every capture call must yield
+                // exactly one frame, otherwise the video loses frames and comes out short:
+                // - with a previous frame, the display is unchanged, so that frame is repeated;
+                // - without one (first frame, or after skipped frames), BeginFrame is retried a few times.
+                if (!frameData.screenshotData && this.#lastFrame) {
+                    this.emit("frame", this.#lastFrame);
+                    return true;
                 }
-                if (!frameData || !frameData.screenshotData) return true;
-                this.emit("frame", Buffer.from(frameData.screenshotData, "base64"));
+                for (let retry = 0; !frameData.screenshotData && retry < Page.BEGIN_FRAME_SCREENSHOT_RETRIES; retry++)
+                    frameData = await this.#beginFrameWithScreenshot(frameFormat);
+                if (!frameData.screenshotData)
+                    throw new Error(`beginFrame returned no screenshot after ${Page.BEGIN_FRAME_SCREENSHOT_RETRIES + 1} attempts`);
+                this.#lastFrame = Buffer.from(frameData.screenshotData, "base64");
+                this.emit("frame", this.#lastFrame);
             }
             else {
                 const screenshotData = await this.target.screenshot({
@@ -904,6 +937,7 @@ export default class Page extends EventEmitter {
      * 重置状态
      */
     #resetStates() {
+        this.#lastFrame = null;
         this.backgroundOpacity = 1;
         this.fonts = [];
         this.acceptResources = [];
