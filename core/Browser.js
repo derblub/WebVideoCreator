@@ -72,6 +72,8 @@ export default class Browser {
     closed = false;
     /** @type {Function[]} - 启动回调队列 */
     #launchCallbacks = [];
+    /** @type {Set<Page>} - Open pages of this browser, idle or handed out to a render */
+    #pages = new Set();
     /** @type {boolean} - 是否初始页面 */
     #firstPage = true;
     /** @type {AsyncLock} - 异步锁 */
@@ -162,8 +164,9 @@ export default class Browser {
                 args: this.#generateArgs()
             });
             // 浏览器关闭时自动处理
+            // Chrome exited or crashed: close() also fails the captures that run on this browser's pages
             this.target.once("disconnected", () => {
-                this.close()
+                this.close(new Error(`Browser ${this.id} disconnected: Chrome exited or crashed`))
                     .catch(err => logger.error(`Browser ${this.id} close error:`, err));
             });
             // 创建页面池
@@ -243,6 +246,12 @@ export default class Browser {
             await new Promise(resolve => this.#launchCallbacks.push(resolve));
         const page = new Page(this, { ...this.pageOptions, _firstPage: this.firstPage });
         await page.init();
+        // The browser may have closed while the page was set up: close() could not reach this page yet
+        if (this.isClosed()) {
+            await page.close().catch(err => logger.error(`Page ${page.id} close error:`, err));
+            throw new Error(`Browser ${this.id} is closed`);
+        }
+        this.#pages.add(page);
         return page;
     }
 
@@ -261,6 +270,7 @@ export default class Browser {
      * @param {Page} page - 页面资源
      */
     async destoryPage(page) {
+        this.#pages.delete(page);
         // generic-pool only destroys borrowed resources; an idle page that closed is evicted by
         // testOnBorrow (validate) on the next acquire
         if (this.#pagePool.isBorrowedResource(page))
@@ -281,14 +291,24 @@ export default class Browser {
 
     /**
      * 关闭浏览器
+     * 
+     * Closes every page of the browser as well. A page that is handed out to a render is not in reach of the
+     * page pool's clear(), and puppeteer emits no close event for the pages of a browser that disconnected: without
+     * this a capture on such a page would wait forever for a browser that is gone.
+     * 
+     * @param {Error} [reason] - Why the browser closes; a running capture fails with it
      */
-    async close() {
+    async close(reason) {
         await this.#asyncLock.acquire("close", async () => {
             if (this.isClosed())
                 return;
             // 设置浏览器状态为已关闭
             this.#setState(Browser.STATE.CLOSED);
             try {
+                const pages = [...this.#pages];
+                this.#pages.clear();
+                await Promise.all(pages.map(page => page.close(reason)
+                    .catch(err => logger.error(`Page ${page.id} close error:`, err))));
                 // 清除页面池资源
                 await this.#pagePool.clear();
                 // 通知浏览器资源池销毁资源

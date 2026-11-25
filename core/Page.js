@@ -538,11 +538,11 @@ export default class Page extends EventEmitter {
         // 暴露录制失败函数
         await this.target.exposeFunction("____screencastFailed", (message = "") => this.#emitScreencastFailed(new Error(`Capture loop failed: ${message}`)));
         // 暴露CSS动画控制函数
-        await this.target.exposeFunction("____seekCSSAnimations", this.#seekCSSAnimations.bind(this));
+        await this.target.exposeFunction("____seekCSSAnimations", this.#captureStep(this.#seekCSSAnimations));
         // 暴露动作序列
-        await this.target.exposeFunction("____seekTimeActions", this.#seekTimeActions.bind(this));
+        await this.target.exposeFunction("____seekTimeActions", this.#captureStep(this.#seekTimeActions));
         // 暴露跳帧函数
-        await this.target.exposeFunction("____skipFrame", this.#skipFrame.bind(this));
+        await this.target.exposeFunction("____skipFrame", this.#captureStep(this.#skipFrame));
         // 暴露下一帧函数
         await this.target.exposeFunction("____captureFrame", this.#captureFrame.bind(this));
         // 暴露添加音频函数
@@ -564,13 +564,43 @@ export default class Page extends EventEmitter {
     }
 
     /**
+     * Wraps a step the capture loop calls through an exposed binding (the loop awaits it before the next frame).
+     * 
+     * The loop reports a rejected step itself (____screencastFailed), but only while the page lives. When the
+     * browser or the tab is gone the rejection cannot be delivered and the loop never continues, so the capture
+     * would neither complete nor fail. A failed step therefore fails the screencast here as well (emitted at
+     * most once per screencast, see #emitScreencastFailed).
+     * 
+     * @param {Function} step - Method of this page
+     * @returns {Function} - The function to expose
+     */
+    #captureStep(step) {
+        return async (...args) => {
+            try {
+                return await step.apply(this, args);
+            }
+            catch (err) {
+                this.#emitScreencastFailed(err);
+                throw err;
+            }
+        };
+    }
+
+    /**
      * seek所有CSS动画
      */
     async #seekCSSAnimations(currentTime) {
         if (this.cssAnimations.length === 0)
             return;
         const pauseAnimationIds = [];
-        const seekPromises = [];
+        const commands = [];
+        // Every command is sent before any is awaited. When the browser dies all of them reject: none may be
+        // left without a handler (an unhandled rejection ends a Node process), the caller gets the first one.
+        const send = (method, params) => {
+            const command = this.#cdpSession.send(method, params);
+            command.catch(() => {});
+            commands.push(command);
+        };
         this.cssAnimations = this.cssAnimations.filter(animation => {
             if (animation.startTime == null)
                 pauseAnimationIds.push(animation.id);
@@ -578,23 +608,23 @@ export default class Page extends EventEmitter {
             const animationCurrentTime = Math.floor(currentTime - animation.startTime);
             if (animationCurrentTime < 0)
                 return true;
-            seekPromises.push(this.#cdpSession.send("Animation.seekAnimations", {
+            send("Animation.seekAnimations", {
                 animations: [animation.id],
                 currentTime: animationCurrentTime
-            }));
+            });
             if (animationCurrentTime >= (animation.duration * (animation.iterations || Infinity)) + animation.delay)
                 return false;
             return true;
         });
         // 暂停动画
         if (pauseAnimationIds.length > 0) {
-            await this.#cdpSession.send("Animation.setPaused", {
+            send("Animation.setPaused", {
                 animations: pauseAnimationIds,
                 paused: true
             });
         }
         // 调度动画
-        await Promise.all(seekPromises);
+        await Promise.all(commands);
     }
 
     /**
@@ -936,13 +966,15 @@ export default class Page extends EventEmitter {
 
     /**
      * 关闭页面
+     * 
+     * @param {Error} [reason] - Why the page closes (e.g. its browser disconnected); a running capture fails with it
      */
-    async close() {
+    async close(reason) {
         await this.#asyncLock.acquire("close", async () => {
             if (this.isClosed())
                 return;
             // 录制中关闭页面时录制不会完成
-            this.#emitScreencastFailed(new Error("Page closed during capture"));
+            this.#emitScreencastFailed(reason instanceof Error ? reason : new Error("Page closed during capture"));
             // 设置页面状态为closed
             this.#setState(Page.STATE.CLOSED);
             try {
