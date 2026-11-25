@@ -592,7 +592,6 @@ export default class Page extends EventEmitter {
     async #seekCSSAnimations(currentTime) {
         if (this.cssAnimations.length === 0)
             return;
-        const pauseAnimationIds = [];
         const commands = [];
         // Every command is sent before any is awaited. When the browser dies all of them reject: none may be
         // left without a handler (an unhandled rejection ends a Node process), the caller gets the first one.
@@ -601,9 +600,27 @@ export default class Page extends EventEmitter {
             command.catch(() => {});
             commands.push(command);
         };
+        // 暂停动画
+        // Animations seen for the first time are paused BEFORE their first seek, not after it. Chrome seeks and
+        // pauses a clone of the animation. Seeking a clone that is not paused resumes it first, and for an animation
+        // that has already run to its end in real time (a slow first frame: Chrome start or page load under load)
+        // that resume rewinds the clone and leaves it without a start time until the next frame. A setPaused that
+        // arrives before that frame then aborts Chrome 119 ("Bad optional access" in
+        // InspectorAnimationAgent::setPaused; with --single-process the whole browser goes). A clone that is paused
+        // first still has the start time of its running or finished animation, and the seek of a paused clone only
+        // sets its time. It also makes the first frame exact: paused after the seek, the clone had already run on
+        // for the time between the two commands.
+        const pauseAnimationIds = this.cssAnimations
+            .filter(animation => animation.startTime == null)
+            .map(animation => animation.id);
+        if (pauseAnimationIds.length > 0) {
+            send("Animation.setPaused", {
+                animations: pauseAnimationIds,
+                paused: true
+            });
+        }
+        // 调度动画
         this.cssAnimations = this.cssAnimations.filter(animation => {
-            if (animation.startTime == null)
-                pauseAnimationIds.push(animation.id);
             animation.startTime = _.defaultTo(animation.startTime, currentTime);
             const animationCurrentTime = Math.floor(currentTime - animation.startTime);
             if (animationCurrentTime < 0)
@@ -616,14 +633,6 @@ export default class Page extends EventEmitter {
                 return false;
             return true;
         });
-        // 暂停动画
-        if (pauseAnimationIds.length > 0) {
-            send("Animation.setPaused", {
-                animations: pauseAnimationIds,
-                paused: true
-            });
-        }
-        // 调度动画
         await Promise.all(commands);
     }
 
