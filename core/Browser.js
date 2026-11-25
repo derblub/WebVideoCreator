@@ -10,6 +10,7 @@ import globalConfig from "../lib/global-config.js";
 import installBrowser from "../lib/install-browser.js";
 import logger from "../lib/logger.js";
 import util from "../lib/util.js";
+import poolReady from "../lib/pool-ready.js";
 
 // 浏览器计数
 let browserIndex = 1;
@@ -168,7 +169,18 @@ export default class Browser {
             // 创建页面池
             this.#createPagePool();
             // 预热页面池
-            await this.#warmupPagePool();
+            try {
+                await this.#warmupPagePool();
+            }
+            catch (err) {
+                // The first page failed: end this Chrome and fail the browser create, so the resource pool
+                // hands the error to the waiting render and starts a new browser for the next one. Chrome is
+                // killed first: a graceful close of this browser can hang (--single-process); close() then
+                // only empties the page pool.
+                this.target.process()?.kill("SIGKILL");
+                await this.close().catch(closeErr => logger.error(`Browser ${this.id} close error:`, closeErr));
+                throw err;
+            }
             // 启动回调
             this.#launchCallbacks.forEach(fn => fn());
             // 设置浏览器状态为已就绪
@@ -205,7 +217,8 @@ export default class Browser {
      */
     async #warmupPagePool() {
         this.#pagePool.start();
-        await this.#pagePool.ready();
+        // Fails with the create error of the first page instead of waiting forever (lib/pool-ready.js)
+        await poolReady(this.#pagePool);
     }
 
     /**

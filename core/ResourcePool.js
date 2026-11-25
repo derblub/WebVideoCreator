@@ -8,6 +8,7 @@ import Browser from "./Browser.js";
 import Page from "./Page.js";
 import globalConfig from "../lib/global-config.js";
 import logger from "../lib/logger.js";
+import poolReady from "../lib/pool-ready.js";
 
 // 异步锁
 const asyncLock = new AsyncLock();
@@ -93,9 +94,17 @@ export default class ResourcePool {
     async warmup() {
         if(this.#warmupped) return;
         await asyncLock.acquire("warmup", async () => {
+            if(this.#warmupped) return;
             this.#browserPool.start();
-            await this.#browserPool.ready();
-            this.#warmupped = true;
+            try {
+                // Fails with the create error of the first browser instead of waiting forever (lib/pool-ready.js)
+                await poolReady(this.#browserPool);
+            }
+            finally {
+                // The pool is started either way: after a failed first browser the next acquire creates one on
+                // demand (a waiting client gets a new create, and its failure rejects that client)
+                this.#warmupped = true;
+            }
         });
     }
 
