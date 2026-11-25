@@ -108,6 +108,8 @@ export default class Page extends EventEmitter {
     #lastFrame = null;
     /** @type {boolean} - 当前录制是否已结束（完成或失败） */
     #screencastSettled = true;
+    /** @type {number} - Number of the current screencast; a capture step belongs to the screencast it was called in */
+    #screencastRun = 0;
 
     /**
      * 构造函数
@@ -361,6 +363,7 @@ export default class Page extends EventEmitter {
             this.#setState(Page.STATE.CAPTURING);
             this.#lastFrame = null;
             this.#screencastSettled = false;
+            this.#screencastRun++;
             // 当当前视图与设定不一致时进行调整
             const { width, height, ..._options } = this.target.viewport() || {};
             if (width != this.width || height != this.height)
@@ -569,18 +572,21 @@ export default class Page extends EventEmitter {
      * The loop reports a rejected step itself (____screencastFailed), but only while the page lives. When the
      * browser or the tab is gone the rejection cannot be delivered and the loop never continues, so the capture
      * would neither complete nor fail. A failed step therefore fails the screencast here as well (emitted at
-     * most once per screencast, see #emitScreencastFailed).
+     * most once per screencast, see #emitScreencastFailed). Only the screencast the step was called in: a step
+     * that rejects after the page was reset and reused must not fail the screencast that runs on it then.
      * 
      * @param {Function} step - Method of this page
      * @returns {Function} - The function to expose
      */
     #captureStep(step) {
         return async (...args) => {
+            const run = this.#screencastRun;
             try {
                 return await step.apply(this, args);
             }
             catch (err) {
-                this.#emitScreencastFailed(err);
+                if (run === this.#screencastRun)
+                    this.#emitScreencastFailed(err);
                 throw err;
             }
         };
